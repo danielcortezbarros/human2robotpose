@@ -27,6 +27,7 @@ catkin_package(
 )
 
 install(PROGRAMS
+  src/realsense_image_publisher.py
   src/human2robotpose_application.py
   src/human2robotpose_implementation.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

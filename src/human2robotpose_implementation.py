@@ -9,34 +9,6 @@ from sensor_msgs.msg import Image
 import message_filters
 import json
 
-def calculate_pepper_arm_joint_angles(shoulder_3d, elbow_3d, wrist_3d):
-    # Vector from shoulder to elbow (upper arm)
-    ab = np.array(elbow_3d) - np.array(shoulder_3d)
-    # Vector from elbow to wrist (lower arm)
-    bc = np.array(wrist_3d) - np.array(elbow_3d)
-    
-    # ShoulderPitch (θ1)
-    shoulder_pitch = np.arctan2(elbow_3d[2] - shoulder_3d[2], elbow_3d[1] - shoulder_3d[1])
-    
-    # ShoulderRoll (θ2)
-    shoulder_roll = np.arctan2(elbow_3d[0] - shoulder_3d[0], elbow_3d[1] - shoulder_3d[1])
-
-    # ElbowYaw (θ3)
-    elbow_yaw = np.arctan2(wrist_3d[0] - elbow_3d[0], wrist_3d[1] - elbow_3d[1])
-
-    # ElbowRoll (θ4), angle between upper and lower arm
-    dot_product = np.dot(ab, bc)
-    magnitude_ab = np.linalg.norm(ab)
-    magnitude_bc = np.linalg.norm(bc)
-    elbow_roll = np.arccos(dot_product / (magnitude_ab * magnitude_bc))
-
-    # Convert angles to degrees for easy interpretation (if needed)
-    shoulder_pitch = np.degrees(shoulder_pitch)
-    shoulder_roll = np.degrees(shoulder_roll)
-    elbow_yaw = np.degrees(elbow_yaw)
-    elbow_roll = np.degrees(elbow_roll)
-
-    return shoulder_pitch, shoulder_roll, elbow_yaw, elbow_roll
 def pixel_to_3d_camera_coords(x, y, depth, K_matrix):
     """
     Convert relative 2D image coordinates (normalized between 0 and 1) and depth to 3D coordinates in world coordinates in the camera frame of reference
@@ -62,7 +34,7 @@ def pixel_to_3d_camera_coords(x, y, depth, K_matrix):
     point_3d = depth * (K_matrix_inv @ point_2d_hom)
 
     # Return the X, Y, Z coordinates
-    return point_3d
+    return point_3d[0], point_3d[1], point_3d[2]
 
 
 class PoseEstimator:
@@ -110,53 +82,67 @@ class PoseEstimator:
         image_rgb.flags.writeable = True
         image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
-        # If landmarks are detected
+        # Get pose landmarks for left shoulder, elbow, wrist
         if results.pose_landmarks:
+
             landmarks = results.pose_landmarks.landmark
 
-            # Clip the normalized coordinates to ensure they are between 0 and 1
-            left_shoulder_pixel = [np.clip(landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].x, 0, 1),
-                                np.clip(landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].y, 0, 1)]
-            left_elbow_pixel = [np.clip(landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].x, 0, 1),
-                                np.clip(landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].y, 0, 1)]
-            left_wrist_pixel = [np.clip(landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].x, 0, 1),
-                                np.clip(landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].y, 0, 1)]
+            # Left shoulder coordinates
+            X1 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].x * self.image_width
+            Y1 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].y * self.image_height
+            Z1 = depth_image[int(Y1), int(X1)]  # Use the depth map to get the Z coordinate
+            X1, Y1, Z1 = pixel_to_3d_camera_coords(X1, Y1, Z1, self.intrinsics)
 
-            # Convert normalized coordinates to pixel coordinates, ensuring values stay within the image bounds
-            shoulder_pixel = [int(left_shoulder_pixel[0] * (self.image_width - 1)), int(left_shoulder_pixel[1] * (self.image_height - 1))]
-            elbow_pixel = [int(left_elbow_pixel[0] * (self.image_width - 1)), int(left_elbow_pixel[1] * (self.image_height - 1))]
-            wrist_pixel = [int(left_wrist_pixel[0] * (self.image_width - 1)), int(left_wrist_pixel[1] * (self.image_height - 1))]
+            # Left elbow coordinates
+            X3 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].x * self.image_width
+            Y3 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].y * self.image_height
+            Z3 = depth_image[int(Y3), int(X3)]
+            X3, Y3, Z3 = pixel_to_3d_camera_coords(X3, Y3, Z3, self.intrinsics)
 
-            # Now you can safely access the depth image
-            shoulder_depth = depth_image[shoulder_pixel[1], shoulder_pixel[0]]
-            elbow_depth = depth_image[elbow_pixel[1], elbow_pixel[0]]
-            wrist_depth = depth_image[wrist_pixel[1], wrist_pixel[0]]
+            # Left wrist coordinates
+            X5 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].x * self.image_width
+            Y5 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].y * self.image_height
+            Z5 = depth_image[int(Y5), int(X5)]
+            X5, Y5, Z5 = pixel_to_3d_camera_coords(X5, Y5, Z5, self.intrinsics)
 
+            # Compute 3D vectors
+            LS_LE_3D = np.array([X3 - X1, Y3 - Y1, Z3 - Z1])  # Left Shoulder to Left Elbow
+            LE_LW_3D = np.array([X5 - X3, Y5 - Y3, Z5 - Z3])  # Left Elbow to Left Wrist
 
-            # Create 3D coordinates (x, y, z) for shoulder, elbow, and wrist
-            shoulder_3d = pixel_to_3d_camera_coords(x=shoulder_pixel[0], 
-                                                    y=shoulder_pixel[1], 
-                                                    depth=shoulder_depth,
-                                                    K_matrix=self.intrinsics)
-           
-            elbow_3d = pixel_to_3d_camera_coords(x=elbow_pixel[0], 
-                                                    y=elbow_pixel[1], 
-                                                    depth=elbow_depth,
-                                                    K_matrix=self.intrinsics)
-           
-            wrist_3d = pixel_to_3d_camera_coords(x=wrist_pixel[0], 
-                                                    y=wrist_pixel[1], 
-                                                    depth=wrist_depth,
-                                                    K_matrix=self.intrinsics)
+            # Calculate left shoulder roll
+            ZeroXLeft = LS_LE_3D.copy()
+            ZeroXLeft[0] = 0  # Zero the X component
 
-            # Calculate the angle using the 3D coordinates
-            angle = calculate_angle(shoulder_3d, elbow_3d, wrist_3d)
+            shoulder_roll = np.arccos(np.dot(LS_LE_3D, ZeroXLeft) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(ZeroXLeft)))
+            shoulder_roll = min(shoulder_roll, np.pi / 2)  # Limit to max range of 90 degrees
 
-            if angle is not None:
-                # Display the angle at the elbow position
-                cv2.putText(image_bgr, str(int(angle)),
-                            tuple(elbow_pixel), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+            # Calculate left elbow roll
+            elbow_roll = np.arccos(np.dot(LS_LE_3D, LE_LW_3D) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(LE_LW_3D)))
+            elbow_roll = -min(elbow_roll, np.pi / 2)  # Limit to max range of 90 degrees, negative for Pepper's convention
+
+            # Calculate left shoulder pitch
+            ZeroYLeft = LS_LE_3D.copy()
+            ZeroYLeft[1] = 0  # Zero the Y component
+            shoulder_pitch = np.arccos(np.dot(LS_LE_3D, ZeroYLeft) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(ZeroYLeft)))
+
+            # Calculate left elbow yaw
+            if shoulder_roll <= 0.4:
+                elbow_yaw = -np.pi / 2
+            elif Y3 - Y5 > 0.2 * np.linalg.norm(LE_LW_3D):
+                elbow_yaw = -np.pi / 2
+            else:
+                elbow_yaw = 0.0
+
+            # Export angles to a file for Pepper
+            angles = {
+                'LShoulderRoll': [np.rad2deg(shoulder_roll)],
+                'LElbowRoll': [np.rad2deg(elbow_roll)],
+                'LShoulderPitch': [np.rad2deg(shoulder_pitch)],
+                'LElbowYaw': [np.rad2deg(elbow_yaw)]
+            }
+
+            print(angles)
+
 
         # Render landmarks
         self.mp_drawing.draw_landmarks(image_bgr, results.pose_landmarks, mp.solutions.pose.POSE_CONNECTIONS)
