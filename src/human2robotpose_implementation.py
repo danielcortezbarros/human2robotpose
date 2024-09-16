@@ -8,6 +8,19 @@ import rospy
 from sensor_msgs.msg import Image
 import message_filters
 import json
+import time 
+
+# Decorator to measure the execution time
+def timeit(func):
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"Execution time of {func.__name__}: {execution_time:.4f} seconds")
+        return result
+    return wrapper
+
 
 def pixel_to_3d_camera_coords(x, y, depth, K_matrix):
     """
@@ -34,13 +47,13 @@ def pixel_to_3d_camera_coords(x, y, depth, K_matrix):
     point_3d = depth * (K_matrix_inv @ point_2d_hom)
 
     # Return the X, Y, Z coordinates
-    return point_3d[0], point_3d[1], point_3d[2]
+    return point_3d
 
 
 class PoseEstimator:
     def __init__(self):
 
-        with open('config/human2robotpose_configuration.json', 'r') as configfile:
+        with open('/root/workspace/pepper_rob_ws/src/human2robotpose/config/human2robotpose_configuration.json', 'r') as configfile:
             config = json.load(configfile)
 
         self.intrinsics = np.array(config['camera_intrinsics'])
@@ -70,6 +83,7 @@ class PoseEstimator:
         # Process the color image to get pose landmarks using MediaPipe
         self.process_pose(color_image, depth_image)
 
+    @timeit
     def process_pose(self, color_image, depth_image):
         # Convert to RGB for MediaPipe processing
         image_rgb = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
@@ -88,57 +102,149 @@ class PoseEstimator:
             landmarks = results.pose_landmarks.landmark
 
             # Left shoulder coordinates
-            X1 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].x * self.image_width
-            Y1 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].y * self.image_height
-            Z1 = depth_image[int(Y1), int(X1)]  # Use the depth map to get the Z coordinate
-            X1, Y1, Z1 = pixel_to_3d_camera_coords(X1, Y1, Z1, self.intrinsics)
+            x = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].x * self.image_width
+            y = landmarks[mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value].y * self.image_height
+            z = depth_image[int(y), int(x)]  # Use the depth map to get the Z coordinate
+            left_shoulder_xyz = pixel_to_3d_camera_coords(x, y, z, self.intrinsics)
+
+            # Right shoulder coordinates
+            x = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER.value].x * self.image_width
+            y = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER.value].y * self.image_height
+            z = depth_image[int(y), int(x)]  # Use the depth map to get the Z coordinate
+            right_shoulder_xyz = pixel_to_3d_camera_coords(x, y, z, self.intrinsics)
 
             # Left elbow coordinates
-            X3 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].x * self.image_width
-            Y3 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].y * self.image_height
-            Z3 = depth_image[int(Y3), int(X3)]
-            X3, Y3, Z3 = pixel_to_3d_camera_coords(X3, Y3, Z3, self.intrinsics)
+            x = landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].x * self.image_width
+            y = landmarks[mp.solutions.pose.PoseLandmark.LEFT_ELBOW.value].y * self.image_height
+            z = depth_image[int(y), int(x)]
+            left_elbow_xyz = pixel_to_3d_camera_coords(x, y, z, self.intrinsics)
+
+            # Right elbow coordinates
+            x = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW.value].x * self.image_width
+            y = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_ELBOW.value].y * self.image_height
+            z= depth_image[int(y), int(x)]
+            right_elbow_xyz = pixel_to_3d_camera_coords(x, y, z, self.intrinsics)
 
             # Left wrist coordinates
-            X5 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].x * self.image_width
-            Y5 = landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].y * self.image_height
-            Z5 = depth_image[int(Y5), int(X5)]
-            X5, Y5, Z5 = pixel_to_3d_camera_coords(X5, Y5, Z5, self.intrinsics)
+            x = landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].x * self.image_width
+            y = landmarks[mp.solutions.pose.PoseLandmark.LEFT_WRIST.value].y * self.image_height
+            z = depth_image[int(y), int(x)]
+            left_wrist_xyz = pixel_to_3d_camera_coords(x, y, z, self.intrinsics)
+
+            # Right wrist coordinates
+            x = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST.value].x * self.image_width
+            y = landmarks[mp.solutions.pose.PoseLandmark.RIGHT_WRIST.value].y * self.image_height
+            z = depth_image[int(y), int(x)]
+            right_wrist_xyz = pixel_to_3d_camera_coords(x, y, z, self.intrinsics)
 
             # Compute 3D vectors
-            LS_LE_3D = np.array([X3 - X1, Y3 - Y1, Z3 - Z1])  # Left Shoulder to Left Elbow
-            LE_LW_3D = np.array([X5 - X3, Y5 - Y3, Z5 - Z3])  # Left Elbow to Left Wrist
+            LS_LE_3D = left_elbow_xyz - left_shoulder_xyz
+            RS_RE_3D = right_elbow_xyz - right_shoulder_xyz
+            LE_LS_3D = left_shoulder_xyz - left_elbow_xyz
+            LW_LE_3D = left_elbow_xyz - left_wrist_xyz
+            RE_RS_3D = right_shoulder_xyz - right_elbow_xyz
+            RW_RE_3D = right_elbow_xyz - right_wrist_xyz
 
-            # Calculate left shoulder roll
-            ZeroXLeft = LS_LE_3D.copy()
-            ZeroXLeft[0] = 0  # Zero the X component
+            LeftZeroXUpperArm = LS_LE_3D.copy()
+            LeftZeroXUpperArm[0] = 0  # Zero the X component
+            RightZeroXUpperArm = RS_RE_3D.copy()
+            RightZeroXUpperArm[0] = 0  # Zero the X component
+            LeftZeroYUpperArm = LS_LE_3D.copy()
+            LeftZeroYUpperArm[1] = 0  # Zero the Y component
+            RightZeroYUpperArm = RS_RE_3D.copy()
+            RightZeroYUpperArm[1] = 0  # Zero the Y component
 
-            shoulder_roll = np.arccos(np.dot(LS_LE_3D, ZeroXLeft) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(ZeroXLeft)))
-            shoulder_roll = min(shoulder_roll, np.pi / 2)  # Limit to max range of 90 degrees
+            # Lower left arm length in 2D (ignoring Z-coordinate)
+            l2_left_2d = np.linalg.norm(LW_LE_3D[:2])  # X and Y components only
 
-            # Calculate left elbow roll
-            elbow_roll = np.arccos(np.dot(LS_LE_3D, LE_LW_3D) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(LE_LW_3D)))
-            elbow_roll = -min(elbow_roll, np.pi / 2)  # Limit to max range of 90 degrees, negative for Pepper's convention
+            # Lower right arm length in 2D (ignoring Z-coordinate)
+            l2_right_2d = np.linalg.norm(RW_RE_3D[:2])  # X and Y components only
 
-            # Calculate left shoulder pitch
-            ZeroYLeft = LS_LE_3D.copy()
-            ZeroYLeft[1] = 0  # Zero the Y component
-            shoulder_pitch = np.arccos(np.dot(LS_LE_3D, ZeroYLeft) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(ZeroYLeft)))
+            # # Robot/Human Angles
+            # LShoulderPitch = []
+            # RShoulderPitch = []
+            # LElbowYaw = []
+            # RElbowYaw = []
+            # RShoulderRoll = []
+            # LShoulderRoll = []
+            # RElbowRoll = []
+            # LElbowRoll = []
 
-            # Calculate left elbow yaw
-            if shoulder_roll <= 0.4:
-                elbow_yaw = -np.pi / 2
-            elif Y3 - Y5 > 0.2 * np.linalg.norm(LE_LW_3D):
-                elbow_yaw = -np.pi / 2
+            # Calculate the left shoulder roll angles
+            tmp = (np.dot(LS_LE_3D, LeftZeroXUpperArm)) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(LeftZeroXUpperArm))
+            left_shoulder_roll = np.arccos(tmp)
+            if left_shoulder_roll >= 1.56:
+                left_shoulder_roll = 1.56
+            if left_shoulder_roll <= np.arccos((np.dot(LS_LE_3D, LeftZeroXUpperArm)) / (np.linalg.norm(LS_LE_3D) * np.linalg.norm(LeftZeroXUpperArm))):
+                left_shoulder_roll = 0.0
+
+            # Calculate the right shoulder roll angles
+            tmp = (np.dot(RS_RE_3D, RightZeroXUpperArm)) / (np.linalg.norm(RS_RE_3D) * np.linalg.norm(RightZeroXUpperArm))
+            right_shoulder_roll = np.arccos(tmp)
+            if right_shoulder_roll >= 1.56:
+                right_shoulder_roll = -1.56
             else:
-                elbow_yaw = 0.0
+                right_shoulder_roll = right_shoulder_roll * (-1)
+            if right_shoulder_roll > -np.arccos((np.dot(RS_RE_3D, RightZeroXUpperArm)) / (np.linalg.norm(RS_RE_3D) * np.linalg.norm(RightZeroXUpperArm))):
+                right_shoulder_roll = 0.0
+
+            # Calculate the left elbow roll angles
+            tmp = (np.dot(LE_LS_3D, LW_LE_3D)) / (np.linalg.norm(LE_LS_3D) * np.linalg.norm(LW_LE_3D))
+            left_elbow_roll = np.arccos(tmp)
+            if left_elbow_roll >= 1.56:
+                left_elbow_roll = -1.56
+            else:
+                left_elbow_roll = left_elbow_roll * -1
+
+            # Calculate the right elbow roll angles
+            tmp = (np.dot(RE_RS_3D, RW_RE_3D)) / (np.linalg.norm(RE_RS_3D) * np.linalg.norm(RW_RE_3D))
+            right_elbow_roll = np.arccos(tmp)
+            if right_elbow_roll >= 1.56:
+                right_elbow_roll = 1.56
+
+            # Calculate the left shoulder pitch & left elbow yaw angles
+            tmp = (np.dot(LeftZeroYUpperArm, LS_LE_3D)) / (np.linalg.norm(LeftZeroYUpperArm) * np.linalg.norm(LS_LE_3D))
+            left_shoulder_pitch = np.arccos(tmp)
+            if left_shoulder_pitch >= np.pi / 2:
+                left_shoulder_pitch = np.pi / 2
+            if left_shoulder_xyz[1] > left_elbow_xyz[1]:
+                left_shoulder_pitch = left_shoulder_pitch * -1
+            if left_shoulder_roll <= 0.4:
+                left_elbow_yaw = -np.pi / 2
+            elif left_elbow_xyz[1] - left_wrist_xyz[1] > 0.2 * l2_left_2d:
+                left_elbow_yaw = -np.pi / 2
+            elif left_elbow_xyz[1] - left_wrist_xyz[1] < 0 and -(left_elbow_xyz[1] - left_wrist_xyz[1]) > 0.2 * l2_left_2d and left_shoulder_roll > 0.7:
+                left_elbow_yaw = np.pi / 2
+            else:
+                left_elbow_yaw = 0.0
+
+            # Calculate the right shoulder pitch & right elbow yaw angles
+            tmp = (np.dot(RightZeroYUpperArm, RS_RE_3D)) / (np.linalg.norm(RightZeroYUpperArm) * np.linalg.norm(RS_RE_3D))
+            right_shoulder_pitch = np.arccos(tmp)
+            if right_shoulder_pitch >= np.pi / 2:
+                right_shoulder_pitch = np.pi / 2
+            if right_shoulder_xyz[1] > right_elbow_xyz[1]:
+                right_shoulder_pitch = right_shoulder_pitch * -1
+            if right_shoulder_roll >= -0.4:
+                right_elbow_yaw = np.pi / 2
+            elif right_elbow_xyz[1] - right_wrist_xyz[1] > 0.2 * l2_right_2d:
+                right_elbow_yaw = np.pi / 2
+            elif right_elbow_xyz[1] - right_wrist_xyz[1] < 0 and -(right_elbow_xyz[1] - right_wrist_xyz[1]) > 0.2 * l2_right_2d and right_shoulder_roll < -0.7:
+                right_elbow_yaw = -np.pi / 2
+            else:
+                right_elbow_yaw = 0.0
+
 
             # Export angles to a file for Pepper
             angles = {
-                'LShoulderRoll': [np.rad2deg(shoulder_roll)],
-                'LElbowRoll': [np.rad2deg(elbow_roll)],
-                'LShoulderPitch': [np.rad2deg(shoulder_pitch)],
-                'LElbowYaw': [np.rad2deg(elbow_yaw)]
+                'LeftShoulderRoll': np.rad2deg(left_shoulder_roll),
+                'LeftElbowRoll': np.rad2deg(left_elbow_roll),
+                'LeftShoulderPitch': np.rad2deg(left_shoulder_pitch),
+                'LeftElbowYaw': np.rad2deg(left_elbow_yaw),
+                'RightShoulderRoll': np.rad2deg(right_shoulder_roll),
+                'RightElbowRoll': np.rad2deg(right_elbow_roll),
+                'RightShoulderPitch': np.rad2deg(right_shoulder_pitch),
+                'RightElbowYaw': np.rad2deg(right_elbow_yaw)
             }
 
             print(angles)
